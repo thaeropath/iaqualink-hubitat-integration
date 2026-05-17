@@ -11,7 +11,7 @@ A Hubitat Elevation device driver for the iAqualink pool control system.
 - Monitors pool/spa temperatures, heater states, and auxiliary equipment
 - Creates child devices for temperature sensors, heaters, and AUX controls
 - Auto-updates on a configurable interval
-- **Google Sheets integration** — logs pool temperature readings to a Google Sheet on every update cycle
+- **Google Sheets integration** — logs pool and/or spa temperature readings to a Google Sheet on every update cycle, with automatic spa mode awareness
 
 ---
 
@@ -20,12 +20,12 @@ A Hubitat Elevation device driver for the iAqualink pool control system.
 ### Prerequisites
 
 - Google account with Google Sheets and Google Apps Script access
-- Pool Temp Sensor child device enabled in driver preferences
+- At least one of **Enable Pool Temp Sensor** or **Enable Spa Temp Sensor** turned on in driver preferences
 
 ### Step 1 — Create the Google Sheet
 
 1. Go to [Google Sheets](https://sheets.google.com) and create a new spreadsheet.
-2. In row 1, add column headers: `Timestamp`, `Temperature`, `Unit`, `Device`.
+2. In row 1, add column headers: `Timestamp`, `Pool Temp`, `Spa Temp`, `Unit`, `Device`.
 
 ### Step 2 — Create the Apps Script Web App
 
@@ -36,7 +36,13 @@ A Hubitat Elevation device driver for the iAqualink pool control system.
 function doPost(e) {
   var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
   var data = JSON.parse(e.postData.contents);
-  sheet.appendRow([data.timestamp, data.temperature, data.unit, data.device_label]);
+  sheet.appendRow([
+    data.timestamp,
+    data.pool_temp !== undefined ? data.pool_temp : "",
+    data.spa_temp  !== undefined ? data.spa_temp  : "",
+    data.unit,
+    data.device_label
+  ]);
   return ContentService.createTextOutput("OK");
 }
 ```
@@ -59,19 +65,34 @@ function doPost(e) {
 ### Step 4 — Configure the Hubitat Driver
 
 1. Open your iAqualink device in the Hubitat web UI.
-2. Under **Preferences**, ensure **Enable Pool Temp Sensor** is turned on.
+2. Under **Preferences → Pool/Spa Settings**, enable at least one of:
+   - **Enable Pool Temp Sensor** — required for pool temp logging
+   - **Enable Spa Temp Sensor** — required for spa temp logging
 3. Scroll to the **Google Sheets Integration** section and:
    - Toggle **Enable Google Sheets Temperature Logging** to on.
    - Paste the Web App URL from Step 3 into **Apps Script Web App URL**.
+   - Optionally enable **Skip Logging When Filter Pump is Off**.
 4. Click **Save Preferences**.
 
 ### What Gets Logged
 
-Each update cycle appends one row to the sheet:
+Each update cycle appends one row to the sheet. Which temperature columns are populated depends on your system type and current mode:
 
-| Timestamp | Temperature | Unit | Device |
-|---|---|---|---|
-| 2026-04-19T08:30:00-07:00 | 78 | F | Pool Controller |
+| System Type | Pool Temp column | Spa Temp column |
+|---|---|---|
+| Pool-only | Current pool temp | *(blank)* |
+| Spa-only | *(blank)* | Current spa temp |
+| Pool+Spa in pool mode | Current pool temp | *(blank)* |
+| Pool+Spa in spa mode | *(blank)* | Current spa temp |
+
+**Example rows:**
+
+| Timestamp | Pool Temp | Spa Temp | Unit | Device |
+|---|---|---|---|---|
+| 2026-04-20T08:30:00-07:00 | 78 | | F | Pool Controller |
+| 2026-04-20T09:00:00-07:00 | | 102 | F | Pool Controller |
+
+When spa mode is active, pool temp is automatically skipped because the pump is circulating spa water — the pool temp reading is unreliable in that state.
 
 ---
 
