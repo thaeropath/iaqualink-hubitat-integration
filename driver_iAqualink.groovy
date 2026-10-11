@@ -60,6 +60,15 @@ metadata {
         attribute "pool_salinity", "string"
         attribute "orp", "string"
         attribute "ph", "string"
+
+        attribute "swc_pool_output", "number"
+        attribute "swc_spa_output", "number"
+        attribute "cloud_cover", "number"
+        attribute "weather_condition", "enum", [ "sunny", "cloudy" ]
+
+        command "setSaltOutput", [[name: "percent", type: "NUMBER", description: "Pool salt cell output (0-100%)"]]
+        command "setWeatherCondition", [[name: "condition", type: "ENUM", constraints: [ "auto", "sunny", "cloudy" ],
+                                         description: "Override the weather used for salt cell automation ('auto' resumes Open-Meteo)"]]
     }
 
     preferences {
@@ -239,6 +248,37 @@ metadata {
                     title: "Skip Logging When Filter Pump is Off",
                     description: "When enabled, pool temperature will not be logged to Google Sheets if the filter pump is off.",
                     defaultValue: true
+            )
+        }
+        section("Salt Cell Weather Automation:") {
+            input(
+                    name: "swcWeatherEnabled",
+                    type: "bool",
+                    title: "Enable Weather-Based Salt Cell Output",
+                    description: "Each update cycle, set the pool salt cell output based on current cloud cover at the hub's location (from Open-Meteo). Night counts as cloudy.",
+                    defaultValue: false
+            )
+            input(
+                    name: "swcSunnyOutput",
+                    type: "number",
+                    title: "Sunny Weather Output (%)",
+                    range: "0..100",
+                    defaultValue: 60
+            )
+            input(
+                    name: "swcCloudyOutput",
+                    type: "number",
+                    title: "Cloudy Weather Output (%)",
+                    range: "0..100",
+                    defaultValue: 30
+            )
+            input(
+                    name: "swcCloudThreshold",
+                    type: "number",
+                    title: "Cloudy Threshold (% Cloud Cover)",
+                    description: "Cloud cover at or above this is cloudy. Must drop 10 points below it to switch back to sunny, to avoid flapping.",
+                    range: "0..100",
+                    defaultValue: 60
             )
         }
     }
@@ -633,6 +673,120 @@ void logTempsToGoogleSheets(Integer poolTemp, Integer spaTemp, String scale, Str
     }
 }
 
+/*
+ * Salt cell (SWC) control. get_swc_config is used by other open-source iAqualink tools,
+ * but set_swc_config is not publicly documented, so its response is logged and the
+ * output is re-read afterwards to confirm the controller actually accepted it.
+ */
+Integer clampPercent(value) {
+    return Math.max(0, Math.min(100, value as Integer))
+}
+
+def getSaltCellConfig() {
+    if (!ensureLogin()) return null
+    def response = doCommand("Fetching salt cell config", "get_swc_config")
+    debugLog("get_swc_config response: ${response}")
+    if (response?.poolSWCSP == null) {
+        warnLog("Salt cell output not available (is a salt chlorinator connected?). Response: ${response}")
+        return null
+    }
+    sendEvent(name: "swc_pool_output", value: response.poolSWCSP as Integer, unit: "%")
+    if (response.spaSWCSP != null)
+        sendEvent(name: "swc_spa_output", value: response.spaSWCSP as Integer, unit: "%")
+    return response
+}
+
+void writeSaltOutput(Integer target, config) {
+    LinkedHashMap args = [poolSWCSP: target as String]
+    if (config.spaSWCSP != null)
+        args.spaSWCSP = config.spaSWCSP as String // send spa output back unchanged
+
+    infoLog("Setting pool salt cell output to ${target}% (currently ${config.poolSWCSP}%).")
+    try {
+        def response = doCommand("Setting salt cell output", "set_swc_config", args)
+        infoLog("set_swc_config response: ${response}")
+    } catch (Exception e) {
+        errorLog("Setting salt cell output failed: ${e.message}")
+        return
+    }
+
+    def after = getSaltCellConfig()
+    if (after != null && (after.poolSWCSP as Integer) != target)
+        warnLog("Salt cell output reads ${after.poolSWCSP}% after requesting ${target}%. The set_swc_config command may not be supported by this system.")
+}
+
+// [Command] Manually set the pool salt cell output
+void setSaltOutput(percent) {
+    if (percent == null) return
+    def config = getSaltCellConfig()
+    if (config != null)
+        writeSaltOutput(clampPercent(percent), config)
+}
+
+// [Command] Override the weather used by salt cell automation ("auto" resumes Open-Meteo)
+void setWeatherCondition(String condition) {
+    if (condition == "auto")
+        state.remove("weatherOverride")
+    else
+        state.weatherOverride = condition
+    infoLog("Salt cell weather set to '${condition}'.")
+
+    if (settings.swcWeatherEnabled)
+        updateSaltCellAutomation()
+    else
+        warnLog("Weather-Based Salt Cell Output is disabled in preferences; the override will apply once it is enabled.")
+}
+
+String getWeatherCondition() {
+    if (state.weatherOverride)
+        return state.weatherOverride
+
+    def params = [
+            uri        : "https://api.open-meteo.com/v1/forecast",
+            query      : [latitude: location.latitude, longitude: location.longitude, current: "cloud_cover,is_day"],
+            contentType: "application/json"
+    ]
+    def current = null
+    httpGet(params) { response -> current = response.data?.current }
+    if (current?.cloud_cover == null) {
+        warnLog("Open-Meteo returned no cloud cover; leaving salt cell output unchanged.")
+        return null
+    }
+
+    Integer cover = current.cloud_cover as Integer
+    sendEvent(name: "cloud_cover", value: cover, unit: "%")
+    if ((current.is_day as Integer) == 0)
+        return "cloudy"
+
+    // Hysteresis: once cloudy, cover must drop 10 points below the threshold to count as sunny again
+    Integer threshold = (settings.swcCloudThreshold != null ? settings.swcCloudThreshold : 60) as Integer
+    boolean wasCloudy = device.currentValue("weather_condition") == "cloudy"
+    return (cover >= threshold || (wasCloudy && cover >= threshold - 10)) ? "cloudy" : "sunny"
+}
+
+void updateSaltCellAutomation() {
+    String condition = getWeatherCondition()
+    if (!condition) return
+    sendEvent(name: "weather_condition", value: condition)
+
+    def config = getSaltCellConfig()
+    if (config == null) return
+
+    String boost = (config.boostStatus ?: "") as String
+    if (!(boost.toLowerCase() in [ "", "0", "off", "false" ])) {
+        debugLog("Salt cell boost is active (boostStatus=${boost}); leaving output unchanged.")
+        return
+    }
+
+    def output = (condition == "sunny") ? settings.swcSunnyOutput : settings.swcCloudyOutput
+    Integer target = clampPercent(output != null ? output : (condition == "sunny" ? 60 : 30))
+    if ((config.poolSWCSP as Integer) == target) {
+        debugLog("Salt cell output already ${target}% for ${condition} weather.")
+        return
+    }
+    writeSaltOutput(target, config)
+}
+
 void updateStates() {
     if (!ensureLogin()) {
         errorLog("Unable to update device states due to failed login.")
@@ -726,4 +880,12 @@ void updateStates() {
         updateChildHeater("PoolHeater", poolHeaterState, freezeProtect, currentPoolTemp, targetPoolTemp, tempScale, iaqualinkTempScale)
     if (settings.spaHeater)
         updateChildHeater("SpaHeater", spaHeaterState, freezeProtect, currentSpaTemp, targetSpaTemp, tempScale, iaqualinkTempScale)
+
+    if (settings.swcWeatherEnabled) {
+        try {
+            updateSaltCellAutomation()
+        } catch (Exception e) {
+            errorLog("Salt cell weather automation failed: ${e.message}")
+        }
+    }
 }

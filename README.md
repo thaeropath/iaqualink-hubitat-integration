@@ -96,6 +96,38 @@ When spa mode is active, pool temp is automatically skipped because the pump is 
 
 ---
 
+## Salt Cell Weather Automation
+
+Sun burns off chlorine faster, so the driver can run the salt cell (SWC) harder on sunny days and ease off when it's cloudy.
+
+### Setup
+
+Under **Preferences → Salt Cell Weather Automation**:
+
+| Preference | Default | Meaning |
+|---|---|---|
+| Enable Weather-Based Salt Cell Output | off | Turns the automation on |
+| Sunny Weather Output (%) | 60 | Pool output used when it's sunny |
+| Cloudy Weather Output (%) | 30 | Pool output used when it's cloudy or night |
+| Cloudy Threshold (% Cloud Cover) | 60 | Cloud cover at or above this counts as cloudy |
+
+### How it works
+
+- Each update cycle, the driver fetches current cloud cover for the hub's location from [Open-Meteo](https://open-meteo.com) (free, no API key). Set the hub's location under **Settings → Location and Modes**.
+- Night always counts as cloudy.
+- To avoid flapping, once it's cloudy, cloud cover must drop 10 points below the threshold before it switches back to sunny.
+- The output is only written when it differs from the current setting. The spa output is left unchanged, and nothing is changed while Boost is active.
+
+### Commands and attributes
+
+- **setWeatherCondition(auto / sunny / cloudy)**: overrides Open-Meteo, for example from a Rule Machine rule that uses your own weather device. `auto` resumes Open-Meteo.
+- **setSaltOutput(percent)**: sets the pool salt cell output manually.
+- Attributes: `swc_pool_output`, `swc_spa_output`, `cloud_cover`, `weather_condition`.
+
+> **Note:** iAqualink doesn't publicly document the command that sets salt cell output. The driver uses `set_swc_config`, logs the controller's response, and re-reads the output afterwards. If you see a warning that the output didn't change, please open an issue with the logged response.
+
+---
+
 ## Credits
 
 - **[Vyrolan](https://github.com/Vyrolan)** — original iAqualink Hubitat driver
