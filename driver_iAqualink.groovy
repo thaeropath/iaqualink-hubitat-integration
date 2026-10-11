@@ -233,6 +233,13 @@ metadata {
                     title: "Apps Script Web App URL",
                     description: "Deploy a Google Apps Script Web App and paste its URL here. See driver source for the required Apps Script code."
             )
+            input(
+                    name: "googleSheetsSkipPumpOff",
+                    type: "bool",
+                    title: "Skip Logging When Filter Pump is Off",
+                    description: "When enabled, pool temperature will not be logged to Google Sheets if the filter pump is off.",
+                    defaultValue: true
+            )
         }
     }
 }
@@ -565,27 +572,48 @@ void updateChildHeater(String key, String status, String freezeProtect, Integer 
  *   function doPost(e) {
  *     var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
  *     var data = JSON.parse(e.postData.contents);
- *     sheet.appendRow([data.timestamp, data.temperature, data.unit, data.device_label]);
+ *     sheet.appendRow([
+ *       data.timestamp,
+ *       data.pool_temp !== undefined ? data.pool_temp : "",
+ *       data.spa_temp  !== undefined ? data.spa_temp  : "",
+ *       data.unit,
+ *       data.device_label
+ *     ]);
  *     return ContentService.createTextOutput("OK");
  *   }
+ *
+ * Sheet column headers (add manually to row 1):
+ *   Timestamp | Pool Temp | Spa Temp | Unit | Device
  *
  * Deploy: New Deployment > Web App. "Execute as" = Me, "Who has access" = Anyone.
  * Copy the Web App URL into the driver preference above.
  */
-void logPoolTempToGoogleSheets(Integer temp, String scale) {
+void logTempsToGoogleSheets(Integer poolTemp, Integer spaTemp, String scale, String pumpState, String spaModeState) {
     if (!settings.googleSheetsEnabled) return
     if (!settings.googleSheetsUrl) {
         warnLog("Google Sheets logging is enabled but no Web App URL is configured.")
         return
     }
 
+    boolean pumpOn    = (pumpState == "1")
+    boolean inSpaMode = (settings.spaMode && spaModeState == "1")
+
+    boolean logPoolTemp = settings.poolTemp && !inSpaMode && (!settings.googleSheetsSkipPumpOff || pumpOn)
+    boolean logSpaTemp  = settings.spaTemp  && (inSpaMode || !settings.spaMode) && (!settings.googleSheetsSkipPumpOff || pumpOn)
+
+    if (!logPoolTemp && !logSpaTemp) {
+        debugLog("Skipping Google Sheets temp log — nothing to log in current state.")
+        return
+    }
+
     def label = device.label ?: device.name
     def payload = [
             timestamp   : new Date().format("yyyy-MM-dd'T'HH:mm:ssXXX"),
-            temperature : temp,
             unit        : scale,
             device_label: label
     ]
+    if (logPoolTemp) payload.pool_temp = poolTemp
+    if (logSpaTemp)  payload.spa_temp  = spaTemp
 
     def params = [
             uri                : settings.googleSheetsUrl,
@@ -596,7 +624,7 @@ void logPoolTempToGoogleSheets(Integer temp, String scale) {
     try {
         httpPost(params) { response ->
             if (response?.status == 200 || response?.status == 302)
-                debugLog("Pool temp logged to Google Sheets: ${temp}${scale}")
+                debugLog("Temps logged to Google Sheets: ${logPoolTemp ? 'pool=' + poolTemp + ' ' : ''}${logSpaTemp ? 'spa=' + spaTemp + ' ' : ''}${scale}")
             else
                 warnLog("Google Sheets logging returned unexpected status: ${response?.status}")
         }
@@ -689,8 +717,9 @@ void updateStates() {
     sendEvent(name: "spa_temp", value: currentSpaTemp, unit: tempScale)
     updateChildState("AirTemp", currentAirTemp as String)
     updateChildState("PoolTemp", currentPoolTemp as String)
-    if (settings.poolTemp)
-        logPoolTempToGoogleSheets(currentPoolTemp, tempScale)
+    if (settings.poolTemp || settings.spaTemp)
+        logTempsToGoogleSheets(currentPoolTemp, currentSpaTemp, tempScale,
+                home[12].pool_pump as String, home[11].spa_pump as String)
     updateChildState("SpaTemp", currentSpaTemp as String)
 
     if (settings.poolHeater)
