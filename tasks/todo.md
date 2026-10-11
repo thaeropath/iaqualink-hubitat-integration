@@ -36,4 +36,8 @@ picks one based on current weather and pushes it to the chlorinator.
   persist/resume, clamping, ignored-write warning, no-SWC system, unset preference defaults. All pass.
 - **Not verified on real hardware:** the `set_swc_config` command and the `boostStatus` value format.
   Open-Meteo is blocked from the dev sandbox, so the request shape follows its documented API.
+- Revision 2 (user feedback): removed "night = cloudy"; added Cloudy Delay (0-24 h, 0 = immediate).
+  Delay applies only sunny→cloudy, resets when it clears, and doesn't apply to manual overrides.
+  Hysteresis now tracks the raw condition in `state.rawWeather`, separate from the delayed
+  `weather_condition` attribute. Test suite expanded to 23 checks, all passing.
 - Weather failures are caught in `updateStates()`, so they never break normal status updates.

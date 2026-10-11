@@ -255,7 +255,7 @@ metadata {
                     name: "swcWeatherEnabled",
                     type: "bool",
                     title: "Enable Weather-Based Salt Cell Output",
-                    description: "Each update cycle, set the pool salt cell output based on current cloud cover at the hub's location (from Open-Meteo). Night counts as cloudy.",
+                    description: "Each update cycle, set the pool salt cell output based on current cloud cover at the hub's location (from Open-Meteo).",
                     defaultValue: false
             )
             input(
@@ -279,6 +279,14 @@ metadata {
                     description: "Cloud cover at or above this is cloudy. Must drop 10 points below it to switch back to sunny, to avoid flapping.",
                     range: "0..100",
                     defaultValue: 60
+            )
+            input(
+                    name: "swcCloudyDelayHours",
+                    type: "number",
+                    title: "Cloudy Delay (Hours)",
+                    description: "How long it must stay cloudy before output is reduced (0 = immediate). Returning to sunny is always immediate.",
+                    range: "0..24",
+                    defaultValue: 0
             )
         }
     }
@@ -743,7 +751,7 @@ String getWeatherCondition() {
 
     def params = [
             uri        : "https://api.open-meteo.com/v1/forecast",
-            query      : [latitude: location.latitude, longitude: location.longitude, current: "cloud_cover,is_day"],
+            query      : [latitude: location.latitude, longitude: location.longitude, current: "cloud_cover"],
             contentType: "application/json"
     ]
     def current = null
@@ -755,13 +763,32 @@ String getWeatherCondition() {
 
     Integer cover = current.cloud_cover as Integer
     sendEvent(name: "cloud_cover", value: cover, unit: "%")
-    if ((current.is_day as Integer) == 0)
-        return "cloudy"
 
     // Hysteresis: once cloudy, cover must drop 10 points below the threshold to count as sunny again
     Integer threshold = (settings.swcCloudThreshold != null ? settings.swcCloudThreshold : 60) as Integer
-    boolean wasCloudy = device.currentValue("weather_condition") == "cloudy"
-    return (cover >= threshold || (wasCloudy && cover >= threshold - 10)) ? "cloudy" : "sunny"
+    boolean wasCloudy = state.rawWeather == "cloudy"
+    String raw = (cover >= threshold || (wasCloudy && cover >= threshold - 10)) ? "cloudy" : "sunny"
+    state.rawWeather = raw
+    return applyCloudyDelay(raw)
+}
+
+// Only report cloudy once it has stayed cloudy for the configured delay; sunny applies immediately
+String applyCloudyDelay(String raw) {
+    if (raw == "sunny") {
+        state.remove("cloudySince")
+        return "sunny"
+    }
+    if (!state.cloudySince)
+        state.cloudySince = now()
+
+    def hours = settings.swcCloudyDelayHours != null ? settings.swcCloudyDelayHours : 0
+    long delayMs = (hours as BigDecimal) * 60 * 60 * 1000
+    long cloudyMs = now() - (state.cloudySince as Long)
+    if (cloudyMs >= delayMs)
+        return "cloudy"
+
+    debugLog("Cloudy for ${(cloudyMs / 60000) as Integer} min; waiting ${hours} h before reducing salt cell output.")
+    return "sunny"
 }
 
 void updateSaltCellAutomation() {

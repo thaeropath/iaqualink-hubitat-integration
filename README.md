@@ -108,13 +108,14 @@ Under **Preferences → Salt Cell Weather Automation**:
 |---|---|---|
 | Enable Weather-Based Salt Cell Output | off | Turns the automation on |
 | Sunny Weather Output (%) | 60 | Pool output used when it's sunny |
-| Cloudy Weather Output (%) | 30 | Pool output used when it's cloudy or night |
+| Cloudy Weather Output (%) | 30 | Pool output used when it's cloudy |
 | Cloudy Threshold (% Cloud Cover) | 60 | Cloud cover at or above this counts as cloudy |
+| Cloudy Delay (Hours) | 0 | How long (0–24 h) it must stay cloudy before output is reduced. 0 = immediate |
 
 ### How it works
 
 - Each update cycle, the driver fetches current cloud cover for the hub's location from [Open-Meteo](https://open-meteo.com) (free, no API key). Set the hub's location under **Settings → Location and Modes**.
-- Night always counts as cloudy.
+- With a Cloudy Delay set, output is only reduced after it has stayed cloudy that long. The timer restarts whenever it clears. Switching back to sunny output is always immediate, and so is a manual `setWeatherCondition(cloudy)` override.
 - To avoid flapping, once it's cloudy, cloud cover must drop 10 points below the threshold before it switches back to sunny.
 - The output is only written when it differs from the current setting. The spa output is left unchanged, and nothing is changed while Boost is active.
 
